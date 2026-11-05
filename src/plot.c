@@ -10,6 +10,7 @@
  */
 #define WIN32_LEAN_AND_MEAN
 #include "plot.h"
+#include "crashlog.h"
 
 #include <windows.h>
 #include <windowsx.h>
@@ -82,8 +83,13 @@ static double g_demo_x;
 static int g_demo_mode;
 
 static RECT g_plotrect;
+static wchar_t g_ini[MAX_PATH];
+static BOOL g_ini_ready;
 
 static int g_dpi = 96;
+
+static void sync_zoom_sliders(void);
+static void request_redraw(BOOL force);
 
 static double clampd(double v, double lo, double hi)
 {
@@ -128,6 +134,84 @@ void plot_clear(void)
     if (g_wnd) InvalidateRect(g_wnd, NULL, FALSE);
 }
 
+static void settings_path(void)
+{
+    const wchar_t *logp = log_file_path();
+    wchar_t *slash;
+
+    wcscpy_s(g_ini, MAX_PATH, logp);
+    slash = wcsrchr(g_ini, L'\\');
+    if (slash) {
+        *slash = 0;
+        wcscat_s(g_ini, MAX_PATH, L"\\settings.ini");
+        g_ini_ready = TRUE;
+    }
+}
+
+static void settings_save(void)
+{
+    wchar_t buf[32];
+
+    if (!g_ini_ready) return;
+    _snwprintf_s(buf, 32, _TRUNCATE, L"%g", g_xstep);
+    WritePrivateProfileStringW(L"plot", L"xstep", buf, g_ini);
+    _snwprintf_s(buf, 32, _TRUNCATE, L"%g", g_ystep);
+    WritePrivateProfileStringW(L"plot", L"ystep", buf, g_ini);
+    _snwprintf_s(buf, 32, _TRUNCATE, L"%g", g_ymax);
+    WritePrivateProfileStringW(L"plot", L"ymax", buf, g_ini);
+    _snwprintf_s(buf, 32, _TRUNCATE, L"%.2f", g_zoomx);
+    WritePrivateProfileStringW(L"plot", L"zoomx", buf, g_ini);
+    _snwprintf_s(buf, 32, _TRUNCATE, L"%.2f", g_zoomy);
+    WritePrivateProfileStringW(L"plot", L"zoomy", buf, g_ini);
+}
+
+static void settings_touch(void)
+{
+    if (g_wnd) SetTimer(g_wnd, 2, 500, NULL);
+}
+
+static double settings_get_double(const wchar_t *key, double def)
+{
+    wchar_t buf[32];
+    wchar_t *end;
+    double v;
+
+    buf[0] = 0;
+    GetPrivateProfileStringW(L"plot", key, L"", buf, 32, g_ini);
+    if (!buf[0]) return def;
+    v = wcstod(buf, &end);
+    if (end == buf || !isfinite(v)) return def;
+    return v;
+}
+
+static void settings_load(void)
+{
+    wchar_t buf[32];
+    double v;
+
+    if (!g_ini_ready) return;
+    g_ready = FALSE;
+
+    v = settings_get_double(L"xstep", 10.0);
+    if (v > 0) g_xstep = v;
+    v = settings_get_double(L"ystep", 10.0);
+    if (v > 0) g_ystep = v;
+    v = settings_get_double(L"ymax", 100.0);
+    if (v > 0) g_ymax = v;
+    g_zoomx = clampd(settings_get_double(L"zoomx", 1.0), ZOOM_MIN, ZOOM_MAX);
+    g_zoomy = clampd(settings_get_double(L"zoomy", 1.0), ZOOM_MIN, ZOOM_MAX);
+
+    _snwprintf_s(buf, 32, _TRUNCATE, L"%g", g_xstep);
+    SetWindowTextW(g_ed_xstep, buf);
+    _snwprintf_s(buf, 32, _TRUNCATE, L"%g", g_ystep);
+    SetWindowTextW(g_ed_ystep, buf);
+    _snwprintf_s(buf, 32, _TRUNCATE, L"%g", g_ymax);
+    SetWindowTextW(g_ed_ymax, buf);
+
+    g_ready = TRUE;
+    sync_zoom_sliders();
+    request_redraw(TRUE);
+}
 static void add_point(double x, double y)
 {
     if (g_paused) return;
@@ -231,6 +315,7 @@ static void apply_settings(void)
         double x0, y0, sx, sy;
         view_params(&x0, &y0, &sx, &sy);
     }
+    settings_touch();
     request_redraw(TRUE);
 }
 
@@ -657,6 +742,11 @@ static LRESULT CALLBACK PlotWndProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         break;
 
     case WM_TIMER:
+        if (wp == 2) {
+            KillTimer(wnd, 2);
+            settings_save();
+            return 0;
+        }
         if (wp == 1) {
             g_demo_x += 1.0;
             if (g_demo_x > 1000.0) g_demo_x = 0.0;
@@ -676,10 +766,12 @@ static LRESULT CALLBACK PlotWndProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         if ((HWND)lp == g_tb_zoomx) {
             int pos = (int)SendMessageW(g_tb_zoomx, TBM_GETPOS, 0, 0);
             set_zoom_x(pos / 100.0);
+            settings_touch();
             request_redraw(TRUE);
         } else if ((HWND)lp == g_tb_zoomy) {
             int pos = (int)SendMessageW(g_tb_zoomy, TBM_GETPOS, 0, 0);
             set_zoom_y(pos / 100.0);
+            settings_touch();
             request_redraw(TRUE);
         }
         return 0;
@@ -693,6 +785,7 @@ static LRESULT CALLBACK PlotWndProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
             if (PtInRect(&g_plotrect, pt)) {
                 int delta = GET_WHEEL_DELTA_WPARAM(wp);
                 zoom_at(pt.x, pt.y, delta > 0 ? 1.25 : 1.0 / 1.25);
+                settings_touch();
                 return 0;
             }
         }
@@ -766,6 +859,8 @@ static LRESULT CALLBACK PlotWndProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
         break;
 
     case WM_DESTROY:
+        KillTimer(wnd, 2);
+        settings_save();
         g_wnd = NULL;
         return 0;
     }
@@ -799,6 +894,8 @@ void plot_create(HWND parent)
                             WS_CHILD | WS_CLIPSIBLINGS | WS_CLIPCHILDREN,
                             0, 0, 100, 100, parent, NULL,
                             (HINSTANCE)(ULONG_PTR)GetWindowLongPtrW(parent, GWLP_HINSTANCE), NULL);
+    settings_path();
+    if (g_wnd) settings_load();
     {
         wchar_t demo[8];
         if (GetEnvironmentVariableW(L"BLE_PLOT_DEMO", demo, 8) &&
