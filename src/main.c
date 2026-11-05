@@ -24,6 +24,7 @@
 #include "crashlog.h"
 #include "logview.h"
 #include "plot.h"
+#include "quicksend.h"
 
 #define APP_NAME        L"BLE 串口助手"
 #define APP_SUBTITLE    L"ESP32 / STM32 · BLE 4.0+ · UTF-8 文本透传"
@@ -60,6 +61,7 @@ enum {
     IDC_EDIT_INTERVAL,
     IDC_EDIT_SEND,
     IDC_BTN_SEND,
+    IDC_BTN_QUICK,
     IDC_LBL_SENDHINT,
     IDC_LBL_CHUNK,
     IDC_LBL_INTERVAL,
@@ -127,6 +129,7 @@ typedef struct App {
     HWND edit_interval;
     HWND edit_send;
     HWND btn_send;
+    HWND btn_quick;
     HWND lbl_sendhint;
     HWND lbl_chunk;
     HWND lbl_interval;
@@ -172,6 +175,7 @@ static const BtnDef kButtons[] = {
     {IDC_BTN_SAVE, BTN_SECONDARY},
     {IDC_BTN_CLEAR_SEND, BTN_SECONDARY},
     {IDC_BTN_SEND, BTN_PRIMARY},
+    {IDC_BTN_QUICK, BTN_SECONDARY},
 };
 
 static BtnKind button_kind(int id)
@@ -740,6 +744,7 @@ static void create_controls(HWND hwnd)
                                  ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | WS_VSCROLL |
                                  WS_TABSTOP | WS_CLIPSIBLINGS, WS_EX_CLIENTEDGE, IDC_EDIT_SEND);
     g_app.btn_send = create_ctl(L"BUTTON", L"发送", BS_OWNERDRAW | WS_TABSTOP, 0, IDC_BTN_SEND);
+    g_app.btn_quick = create_ctl(L"BUTTON", L"快捷…", BS_OWNERDRAW | WS_TABSTOP, 0, IDC_BTN_QUICK);
     g_app.lbl_sendhint = create_ctl(L"STATIC", L"Ctrl+Enter 快速发送", SS_LEFT, 0, IDC_LBL_SENDHINT);
 
     plot_create(g_app.wnd);
@@ -918,6 +923,7 @@ static void layout(HWND hwnd)
         MoveWindow(g_app.lbl_interval, cx, y, S(56), btn_h, TRUE);
         cx += S(58);
         MoveWindow(g_app.edit_interval, cx, y + S(2), S(46), S(24), TRUE);
+        MoveWindow(g_app.btn_quick, x + w - S(96), y, S(96), btn_h, TRUE);
 
         y += btn_h + S(8);
         {
@@ -1159,6 +1165,55 @@ static void do_send(void)
     free(bytes);
 }
 
+/* F1~F7 快捷发送：文本 + 当前行尾设置，按当前分包/间隔发送 */
+static void quick_send_text(const wchar_t *text)
+{
+    int tlen, need, blen, eol, chunk, interval, rc;
+    uint8_t *bytes;
+    wchar_t msg[200];
+
+    if (!text || !text[0]) return;
+    if (!ble_is_connected()) {
+        append_log_line(L"快捷发送失败：尚未连接 BLE 设备");
+        MessageBeep(MB_ICONWARNING);
+        return;
+    }
+
+    tlen = (int)wcslen(text);
+    need = WideCharToMultiByte(CP_UTF8, 0, text, tlen, NULL, 0, NULL, NULL);
+    if (need < 0) need = 0;
+    bytes = (uint8_t *)malloc((size_t)need + 3);
+    if (!bytes) return;
+
+    blen = WideCharToMultiByte(CP_UTF8, 0, text, tlen, (char *)bytes, need, NULL, NULL);
+    if (blen < 0) blen = 0;
+    eol = (int)SendMessageW(g_app.cmb_eol, CB_GETCURSEL, 0, 0);
+    if (eol == 1) {
+        bytes[blen++] = '\r';
+        bytes[blen++] = '\n';
+    } else if (eol == 2) {
+        bytes[blen++] = '\n';
+    }
+
+    chunk = GetDlgItemInt(g_app.wnd, IDC_EDIT_CHUNK, NULL, FALSE);
+    interval = GetDlgItemInt(g_app.wnd, IDC_EDIT_INTERVAL, NULL, FALSE);
+    if (chunk <= 0) chunk = 20;
+    if (chunk > 512) chunk = 512;
+
+    rc = ble_send(bytes, blen, chunk, interval);
+    free(bytes);
+
+    if (rc == BLE_OK) {
+        _snwprintf_s(msg, 200, _TRUNCATE, L"快捷发送：%.60s", text);
+        append_log_line(msg);
+        log_write(L"[quick] %s", text);
+    } else if (rc == BLE_ERR_BUSY) {
+        append_log_line(L"快捷发送失败：发送队列已满");
+    } else {
+        append_log_line(L"快捷发送失败（未连接或参数错误）");
+    }
+}
+
 static void do_save(void)
 {
     OPENFILENAMEW ofn;
@@ -1383,6 +1438,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case IDC_BTN_SEND:
             do_send();
             break;
+        case IDC_BTN_QUICK:
+            quicksend_show_dialog();
+            break;
         case IDC_LIST_DEV:
             if (HIWORD(wp) == LBN_DBLCLK) do_connect();
             if (HIWORD(wp) == LBN_SELCHANGE) refresh_status();
@@ -1526,10 +1584,13 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmd, int show)
              g_app.radio_ok ? L"蓝牙适配器：可用" : L"蓝牙适配器：未就绪");
     refresh_status();
 
+    quicksend_init(hwnd, quick_send_text);
+
     ShowWindow(hwnd, show);
     UpdateWindow(hwnd);
 
     while (GetMessageW(&msg, NULL, 0, 0) > 0) {
+        if (msg.message == WM_KEYDOWN && quicksend_handle_key((int)msg.wParam)) continue;
         if (IsDialogMessageW(hwnd, &msg)) continue;
         TranslateMessage(&msg);
         DispatchMessageW(&msg);

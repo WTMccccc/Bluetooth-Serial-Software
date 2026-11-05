@@ -17,6 +17,8 @@ add_executable(ble_uart WIN32
     src/crashlog.c
     src/logview.c
     src/plot.c
+    src/settings.c
+    src/quicksend.c
     src/app.rc
 )
 
