@@ -23,6 +23,7 @@
 #include "winrt_abi.h"
 #include "crashlog.h"
 #include "logview.h"
+#include "plot.h"
 
 #define APP_NAME        L"BLE 串口助手"
 #define APP_SUBTITLE    L"ESP32 / STM32 · BLE 4.0+ · UTF-8 文本透传"
@@ -50,6 +51,7 @@ enum {
     IDC_CHK_AUTOSCROLL,
     IDC_CHK_HEXVIEW,
     IDC_CHK_SHOWSTATUS,
+    IDC_CHK_PLOT,
     IDC_EDIT_RECV,
     IDC_BTN_CLEAR_SEND,
     IDC_CHK_HEXSEND,
@@ -116,6 +118,7 @@ typedef struct App {
     HWND chk_autoscroll;
     HWND chk_hexview;
     HWND chk_showstatus;
+    HWND chk_plot;
     HWND edit_recv;
     HWND btn_clear_send;
     HWND chk_hexsend;
@@ -720,6 +723,7 @@ static void create_controls(HWND hwnd)
     g_app.chk_autoscroll = create_ctl(L"BUTTON", L"自动滚动", BS_AUTOCHECKBOX | WS_TABSTOP, 0, IDC_CHK_AUTOSCROLL);
     g_app.chk_hexview = create_ctl(L"BUTTON", L"HEX 显示", BS_AUTOCHECKBOX | WS_TABSTOP, 0, IDC_CHK_HEXVIEW);
     g_app.chk_showstatus = create_ctl(L"BUTTON", L"状态提示", BS_AUTOCHECKBOX | WS_TABSTOP, 0, IDC_CHK_SHOWSTATUS);
+    g_app.chk_plot = create_ctl(L"BUTTON", L"曲线", BS_AUTOCHECKBOX | WS_TABSTOP, 0, IDC_CHK_PLOT);
     g_app.edit_recv = create_ctl(L"EDIT", L"",
                                  ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL |
                                  WS_TABSTOP | WS_CLIPSIBLINGS, WS_EX_CLIENTEDGE, IDC_EDIT_RECV);
@@ -737,6 +741,8 @@ static void create_controls(HWND hwnd)
                                  WS_TABSTOP | WS_CLIPSIBLINGS, WS_EX_CLIENTEDGE, IDC_EDIT_SEND);
     g_app.btn_send = create_ctl(L"BUTTON", L"发送", BS_OWNERDRAW | WS_TABSTOP, 0, IDC_BTN_SEND);
     g_app.lbl_sendhint = create_ctl(L"STATIC", L"Ctrl+Enter 快速发送", SS_LEFT, 0, IDC_LBL_SENDHINT);
+
+    plot_create(g_app.wnd);
 
     SendMessageW(g_app.cmb_eol, CB_ADDSTRING, 0, (LPARAM)L"无行尾");
     SendMessageW(g_app.cmb_eol, CB_ADDSTRING, 0, (LPARAM)L"CRLF (\\r\\n)");
@@ -878,8 +884,17 @@ static void layout(HWND hwnd)
         MoveWindow(g_app.chk_hexview, cx, y + S(3), S(76), S(24), TRUE);
         cx += S(78);
         MoveWindow(g_app.chk_showstatus, cx, y + S(3), S(80), S(24), TRUE);
+        cx += S(82);
+        MoveWindow(g_app.chk_plot, cx, y + S(3), S(58), S(24), TRUE);
         y += btn_h + S(8);
         MoveWindow(g_app.edit_recv, x, y, w, (g_app.card_recv.bottom - S(12)) - y, TRUE);
+        {
+            RECT pr;
+            GetWindowRect(g_app.edit_recv, &pr);
+            MapWindowPoints(NULL, g_app.wnd, (POINT *)&pr, 2);
+            plot_layout(&pr);
+            ShowWindow(g_app.edit_recv, plot_is_visible() ? SW_HIDE : SW_SHOW);
+        }
     }
 
     /* 发送区 */
@@ -1260,6 +1275,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             BYTE buf[4096];
             int n;
             while ((n = ble_rx_read(buf, (int)sizeof(buf))) > 0) {
+                plot_feed(buf, n);
                 rx_append_bytes(buf, n);
             }
         } else if (wp == 3) {
@@ -1352,12 +1368,17 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         case IDC_BTN_CLEAR_RECV:
             SetWindowTextW(g_app.edit_recv, L"");
             g_app.u8_pending_len = 0;
+            plot_clear();
             break;
         case IDC_BTN_CLEAR_SEND:
             SetWindowTextW(g_app.edit_send, L"");
             break;
         case IDC_BTN_SAVE:
             do_save();
+            break;
+        case IDC_CHK_PLOT:
+            plot_show(IsDlgButtonChecked(g_app.wnd, IDC_CHK_PLOT) == BST_CHECKED);
+            layout(hwnd);
             break;
         case IDC_BTN_SEND:
             do_send();

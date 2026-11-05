@@ -34,7 +34,7 @@ if /i "%~1"=="cli" (
 )
 
 rc /nologo /I src /fo build\app.res src\app.rc || exit /b 1
-cl %CFLAGS% src\main.c src\ble.c src\util.c src\crashlog.c src\logview.c build\app.res /Fo:build\ /Fe:build\ble_uart.exe ^
+cl %CFLAGS% src\main.c src\ble.c src\util.c src\crashlog.c src\logview.c src\plot.c build\app.res /Fo:build\ /Fe:build\ble_uart.exe ^
    /link /SUBSYSTEM:WINDOWS %LIBS%
 if errorlevel 1 exit /b 1
 
