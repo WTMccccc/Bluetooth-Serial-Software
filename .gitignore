@@ -1,0 +1,18 @@
+build/
+build-cmake/
+*.obj
+*.pdb
+*.ilk
+*.res
+*.user
+.vs/
+
+# 自签名证书私钥，不要提交
+certs/*.pfx
+
+# 备份快照（含私钥，体积大）
+backup/
+
+# 运行日志 / 崩溃 dump
+*.log
+crash_*.dmp

@@ -1,0 +1,7 @@
+# 换行符：build.bat 必须是 CRLF，否则 cmd 解析会出错
+*.bat text eol=crlf
+*.ps1 text eol=lf
+*.c   text eol=lf
+*.h   text eol=lf
+*.md  text eol=lf
+*.ino text eol=lf
