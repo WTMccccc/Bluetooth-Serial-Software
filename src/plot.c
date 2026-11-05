@@ -24,7 +24,6 @@
 
 #define IDC_XSTEP   3001
 #define IDC_YSTEP   3002
-#define IDC_XMAX    3003
 #define IDC_YMAX    3004
 #define IDC_PAUSE   3005
 #define IDC_CLEAR   3006
@@ -50,7 +49,7 @@ static HWND g_wnd;
 static BOOL g_visible;
 static BOOL g_ready;
 
-static HWND g_ed_xstep, g_ed_ystep, g_ed_xmax, g_ed_ymax;
+static HWND g_ed_xstep, g_ed_ystep, g_ed_ymax;
 static HWND g_chk_pause, g_btn_clear;
 static HWND g_tb_zoomx, g_tb_zoomy;
 static HWND g_lbl[6];
@@ -66,11 +65,14 @@ static char g_pbuf[64];
 static int g_plen;
 static int g_pkt;
 
-/* 视图设置 */
-static double g_xmax = 100.0, g_ymax = 100.0;
+/* 视图设置：X 轴不设最大值，按数据自动向右滚动 */
+static double g_xwin = 100.0;          /* 1x 时 X 轴窗口宽度（数据单位） */
+static double g_ymax = 100.0;
 static double g_xstep = 10.0, g_ystep = 10.0;
 static double g_zoomx = 1.0, g_zoomy = 1.0;
 static double g_x0 = 0.0, g_y0 = 0.0;
+static double g_latest_x;
+static BOOL g_have_x;
 static BOOL g_paused;
 static DWORD g_last_inval;
 static BOOL g_drag;
@@ -92,11 +94,11 @@ static double clampd(double v, double lo, double hi)
 
 static void view_params(double *x0, double *y0, double *sx, double *sy)
 {
-    *sx = g_xmax / g_zoomx;
+    *sx = g_xwin / g_zoomx;
     *sy = g_ymax / g_zoomy;
     if (*sx < 1e-6) *sx = 1e-6;
     if (*sy < 1e-6) *sy = 1e-6;
-    *x0 = clampd(g_x0, 0.0, g_xmax - *sx > 0.0 ? g_xmax - *sx : 0.0);
+    *x0 = g_x0 < 0.0 ? 0.0 : g_x0;
     *y0 = clampd(g_y0, 0.0, g_ymax - *sy > 0.0 ? g_ymax - *sy : 0.0);
     g_x0 = *x0;
     g_y0 = *y0;
@@ -144,6 +146,22 @@ static void add_point(double x, double y)
         g_pts[g_start].x = (float)x;
         g_pts[g_start].y = (float)y;
         g_start = (g_start + 1) % g_cap;
+    }
+    {
+        double span = g_xwin / g_zoomx;
+        if (!g_have_x) {
+            g_x0 = x > span * 0.02 ? x - span * 0.02 : 0.0;
+            g_have_x = TRUE;
+        } else if (x < g_x0 - span * 0.5) {
+            /* 新一轮数据从较小的 x 重新开始 */
+            g_x0 = x - span * 0.02;
+            if (g_x0 < 0.0) g_x0 = 0.0;
+        } else if (x > g_x0 + span * 0.98) {
+            /* 数据超出右边界：窗口跟着往右移 */
+            g_x0 = x - span * 0.98;
+            if (g_x0 < 0.0) g_x0 = 0.0;
+        }
+        g_latest_x = x;
     }
     request_redraw(FALSE);
 }
@@ -208,7 +226,6 @@ static void apply_settings(void)
     if (!g_ready) return;
     if (read_double(g_ed_xstep, &v) && v > 0) g_xstep = v;
     if (read_double(g_ed_ystep, &v) && v > 0) g_ystep = v;
-    if (read_double(g_ed_xmax, &v) && v > 0 && v > g_xstep) g_xmax = v;
     if (read_double(g_ed_ymax, &v) && v > 0 && v > g_ystep) g_ymax = v;
     {
         double x0, y0, sx, sy;
@@ -217,15 +234,26 @@ static void apply_settings(void)
     request_redraw(TRUE);
 }
 
-static void set_zoom(double *zoom, double nz, double *origin, double maxv)
+static void set_zoom_x(double nz)
 {
-    double old_span = maxv / *zoom;
-    double center = *origin + old_span / 2.0;
+    nz = clampd(nz, ZOOM_MIN, ZOOM_MAX);
+    g_zoomx = nz;
+    if (g_have_x) {
+        double span = g_xwin / g_zoomx;
+        g_x0 = g_latest_x - span * 0.98;
+        if (g_x0 < 0.0) g_x0 = 0.0;
+    }
+}
+
+static void set_zoom_y(double nz)
+{
+    double old_span = g_ymax / g_zoomy;
+    double center = g_y0 + old_span / 2.0;
     double new_span;
     nz = clampd(nz, ZOOM_MIN, ZOOM_MAX);
-    *zoom = nz;
-    new_span = maxv / *zoom;
-    *origin = clampd(center - new_span / 2.0, 0.0, maxv - new_span > 0 ? maxv - new_span : 0.0);
+    g_zoomy = nz;
+    new_span = g_ymax / g_zoomy;
+    g_y0 = clampd(center - new_span / 2.0, 0.0, g_ymax - new_span > 0 ? g_ymax - new_span : 0.0);
 }
 
 static void sync_zoom_sliders(void)
@@ -254,12 +282,13 @@ static void zoom_at(int px, int py, double factor)
         double datay = y0 + fy * sy;
         double nzx = clampd(g_zoomx * factor, ZOOM_MIN, ZOOM_MAX);
         double nzy = clampd(g_zoomy * factor, ZOOM_MIN, ZOOM_MAX);
-        double nsx = g_xmax / nzx;
+        double nsx = g_xwin / nzx;
         double nsy = g_ymax / nzy;
 
         g_zoomx = nzx;
         g_zoomy = nzy;
-        g_x0 = clampd(datax - fx * nsx, 0.0, g_xmax - nsx > 0 ? g_xmax - nsx : 0.0);
+        g_x0 = datax - fx * nsx;
+        if (g_x0 < 0.0) g_x0 = 0.0;
         g_y0 = clampd(datay - fy * nsy, 0.0, g_ymax - nsy > 0 ? g_ymax - nsy : 0.0);
     }
     sync_zoom_sliders();
@@ -285,7 +314,7 @@ static void draw_labels(HDC dc)
     SelectObject(dc, g_font_small);
 
     /* X 轴刻度 */
-    v = floor(x0 / g_xstep) * g_xstep;
+    v = ceil(x0 / g_xstep) * g_xstep;
     if (v < 0) v = 0;
     for (; v <= x0 + sx + 1e-9 && guard < 200; v += g_xstep, guard++) {
         int px = g_plotrect.left + (int)((v - x0) / sx * w);
@@ -300,7 +329,7 @@ static void draw_labels(HDC dc)
 
     /* Y 轴刻度 */
     guard = 0;
-    v = floor(y0 / g_ystep) * g_ystep;
+    v = ceil(y0 / g_ystep) * g_ystep;
     if (v < 0) v = 0;
     for (; v <= y0 + sy + 1e-9 && guard < 200; v += g_ystep, guard++) {
         int py = g_plotrect.bottom - (int)((v - y0) / sy * h);
@@ -328,7 +357,7 @@ static void draw_grid(HDC dc)
     SelectObject(dc, pen);
 
     guard = 0;
-    v = floor(x0 / g_xstep) * g_xstep;
+    v = ceil(x0 / g_xstep) * g_xstep;
     if (v < 0) v = 0;
     for (; v <= x0 + sx + 1e-9 && guard < 200; v += g_xstep, guard++) {
         int px = g_plotrect.left + (int)((v - x0) / sx * w);
@@ -336,7 +365,7 @@ static void draw_grid(HDC dc)
         LineTo(dc, px, g_plotrect.bottom);
     }
     guard = 0;
-    v = floor(y0 / g_ystep) * g_ystep;
+    v = ceil(y0 / g_ystep) * g_ystep;
     if (v < 0) v = 0;
     for (; v <= y0 + sy + 1e-9 && guard < 200; v += g_ystep, guard++) {
         int py = g_plotrect.bottom - (int)((v - y0) / sy * h);
@@ -501,14 +530,12 @@ static void create_children(HWND wnd)
 
     g_lbl[0] = make_ctl(L"STATIC", L"X 步长", SS_RIGHT, 0, IDC_LXSTEP);
     g_lbl[1] = make_ctl(L"STATIC", L"Y 步长", SS_RIGHT, 0, IDC_LYSTEP);
-    g_lbl[2] = make_ctl(L"STATIC", L"X 最大", SS_RIGHT, 0, IDC_LXMAX);
     g_lbl[3] = make_ctl(L"STATIC", L"Y 最大", SS_RIGHT, 0, IDC_LYMAX);
     g_lbl[4] = make_ctl(L"STATIC", L"X 缩放", SS_RIGHT, 0, IDC_LZX);
     g_lbl[5] = make_ctl(L"STATIC", L"Y 缩放", SS_RIGHT, 0, IDC_LZY);
 
     g_ed_xstep = make_ctl(L"EDIT", L"10", ES_AUTOHSCROLL | WS_TABSTOP, WS_EX_CLIENTEDGE, IDC_XSTEP);
     g_ed_ystep = make_ctl(L"EDIT", L"10", ES_AUTOHSCROLL | WS_TABSTOP, WS_EX_CLIENTEDGE, IDC_YSTEP);
-    g_ed_xmax = make_ctl(L"EDIT", L"100", ES_AUTOHSCROLL | WS_TABSTOP, WS_EX_CLIENTEDGE, IDC_XMAX);
     g_ed_ymax = make_ctl(L"EDIT", L"100", ES_AUTOHSCROLL | WS_TABSTOP, WS_EX_CLIENTEDGE, IDC_YMAX);
 
     g_chk_pause = make_ctl(L"BUTTON", L"暂停", BS_AUTOCHECKBOX | WS_TABSTOP, 0, IDC_PAUSE);
@@ -539,7 +566,7 @@ static void create_children(HWND wnd)
 
     {
         HWND all[] = { g_lbl[0], g_lbl[1], g_lbl[2], g_lbl[3], g_lbl[4], g_lbl[5],
-                       g_ed_xstep, g_ed_ystep, g_ed_xmax, g_ed_ymax,
+                       g_ed_xstep, g_ed_ystep, g_ed_ymax,
                        g_chk_pause, g_btn_clear };
         int i;
         for (i = 0; i < (int)(sizeof(all) / sizeof(all[0])); i++)
@@ -564,8 +591,6 @@ static void do_layout(HWND wnd)
     MoveWindow(g_ed_xstep, x, y, ew, eh, TRUE); x += ew + gap;
     MoveWindow(g_lbl[1], x, y + 4, lw - 6, 20, TRUE); x += lw;
     MoveWindow(g_ed_ystep, x, y, ew, eh, TRUE); x += ew + gap;
-    MoveWindow(g_lbl[2], x, y + 4, lw - 6, 20, TRUE); x += lw;
-    MoveWindow(g_ed_xmax, x, y, ew, eh, TRUE); x += ew + gap;
     MoveWindow(g_lbl[3], x, y + 4, lw - 6, 20, TRUE); x += lw;
     MoveWindow(g_ed_ymax, x, y, ew, eh, TRUE); x += ew + gap;
     MoveWindow(g_chk_pause, x, y + 3, 58, 22, TRUE); x += 62;
@@ -618,7 +643,7 @@ static LRESULT CALLBACK PlotWndProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
 
     case WM_COMMAND:
         switch (LOWORD(wp)) {
-        case IDC_XSTEP: case IDC_YSTEP: case IDC_XMAX: case IDC_YMAX:
+        case IDC_XSTEP: case IDC_YSTEP: case IDC_YMAX:
             if (HIWORD(wp) == EN_CHANGE) apply_settings();
             return 0;
         case IDC_PAUSE:
@@ -634,7 +659,7 @@ static LRESULT CALLBACK PlotWndProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_TIMER:
         if (wp == 1) {
             g_demo_x += 1.0;
-            if (g_demo_x > g_xmax) g_demo_x = 0.0;
+            if (g_demo_x > 1000.0) g_demo_x = 0.0;
             if (g_demo_mode == 2) {
                 char pkt[48];
                 int n = sprintf(pkt, "[%.1f,%.1f]", g_demo_x,
@@ -650,11 +675,11 @@ static LRESULT CALLBACK PlotWndProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_HSCROLL:
         if ((HWND)lp == g_tb_zoomx) {
             int pos = (int)SendMessageW(g_tb_zoomx, TBM_GETPOS, 0, 0);
-            set_zoom(&g_zoomx, pos / 100.0, &g_x0, g_xmax);
+            set_zoom_x(pos / 100.0);
             request_redraw(TRUE);
         } else if ((HWND)lp == g_tb_zoomy) {
             int pos = (int)SendMessageW(g_tb_zoomy, TBM_GETPOS, 0, 0);
-            set_zoom(&g_zoomy, pos / 100.0, &g_y0, g_ymax);
+            set_zoom_y(pos / 100.0);
             request_redraw(TRUE);
         }
         return 0;
@@ -702,8 +727,8 @@ static LRESULT CALLBACK PlotWndProc(HWND wnd, UINT msg, WPARAM wp, LPARAM lp)
             pt.x = GET_X_LPARAM(lp);
             pt.y = GET_Y_LPARAM(lp);
             view_params(&x0, &y0, &sx, &sy);
-            g_x0 = clampd(g_dragx0 - (double)(pt.x - g_dragpt.x) / (double)w * sx,
-                          0.0, g_xmax - sx > 0 ? g_xmax - sx : 0.0);
+            g_x0 = g_dragx0 - (double)(pt.x - g_dragpt.x) / (double)w * sx;
+            if (g_x0 < 0.0) g_x0 = 0.0;
             g_y0 = clampd(g_dragy0 + (double)(pt.y - g_dragpt.y) / (double)h * sy,
                           0.0, g_ymax - sy > 0 ? g_ymax - sy : 0.0);
             request_redraw(TRUE);
